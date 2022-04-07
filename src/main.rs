@@ -15,6 +15,7 @@ use winit::platform::windows::WindowExtWindows;
 use winit::window::{Window, WindowBuilder};
 
 use ash::util::*;
+use ash::prelude::*;
 use ash::vk::{self, SwapchainKHR};
 use std::cmp;
 use std::collections::HashMap;
@@ -42,7 +43,7 @@ fn main() -> Result<()> {
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
-        .with_title("Vulkan Tutorial (Rust)")
+        .with_title("VK_RUSTY_TRIANGLE")
         .with_inner_size(LogicalSize::new(1024, 768))
         .build(&event_loop)?;
 
@@ -83,7 +84,9 @@ struct App {
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
     swapchain_loader: ash::extensions::khr::Swapchain,
-    swapchain: vk::SwapchainKHR
+    swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<vk::Image>,
+    swapchain_views: Vec<vk::ImageView>
 }
 
 impl App {
@@ -352,6 +355,26 @@ impl App {
 
         let swapchain_loader = Swapchain::new(&instance, &device);
         let swapchain = swapchain_loader.create_swapchain(&swapchain_info, None)?;
+        let swapchain_images = swapchain_loader.get_swapchain_images(swapchain)?;
+        let swapchain_views = swapchain_images
+            .iter()
+            .map(|&image| {
+                let subresource_info = vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1);
+
+                let view_info = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format.format)
+                    .components(vk::ComponentMapping::default())
+                    .subresource_range(subresource_info);
+                
+                device.create_image_view(&view_info, None)
+            }).collect::<VkResult<Vec<vk::ImageView>>>()?;
 
         Ok(Self {
             entry,
@@ -363,7 +386,9 @@ impl App {
             graphics_queue,
             present_queue,
             swapchain_loader,
-            swapchain
+            swapchain,
+            swapchain_images,
+            swapchain_views
         })
     }
 
@@ -374,6 +399,9 @@ impl App {
 
     /// Destroys our Vulkan app.
     unsafe fn destroy(&mut self) {
+        for &view in self.swapchain_views.iter() {
+            self.device.destroy_image_view(view, None);
+        }
         self.swapchain_loader.destroy_swapchain(self.swapchain, None);
         self.device.destroy_device(None);
         self.surface_loader.destroy_surface(self.surface, None);
