@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use ash::extensions::ext::DebugUtils;
-use ash::extensions::khr::Swapchain;
+use ash::extensions::khr::{Swapchain, TimelineSemaphore};
 use safe_transmute::guard::AllOrNothingGuard;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{Event, WindowEvent};
@@ -29,6 +29,7 @@ use std::io::Cursor;
 use std::mem;
 use std::mem::align_of;
 use std::ops::Deref;
+use std::rc::Rc;
 use std::sync::Arc;
 
 static VERTEX_BYTECODE: &'static [u8] = include_bytes!("./vert.spv");
@@ -50,7 +51,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("VK_RUSTY_TRIANGLE")
-        .with_inner_size(LogicalSize::new(512, 384))
+        .with_inner_size(LogicalSize::new(1536, 1152))
         .build(&event_loop)?;
 
     // App
@@ -78,6 +79,89 @@ fn main() -> Result<()> {
     });
 }
 
+struct PerFrame {
+    device: Rc<ash::Device>,
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    image_available_semaphore: vk::Semaphore,
+    render_finished_semaphore: vk::Semaphore,
+    in_flight_fence: vk::Fence,
+}
+
+impl PerFrame {
+    fn create(device: Rc<ash::Device>, command_pool: vk::CommandPool) -> VkResult<PerFrame> {
+        unsafe {
+            let command_buffer = device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            );
+
+            let image_available_semaphore = match command_buffer {
+                Ok(_) => device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None),
+                Err(e) => Err(e)
+            };
+
+            let render_finished_semaphore = image_available_semaphore
+                .and_then(|_| device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None));
+
+            let in_flight_fence = render_finished_semaphore.and_then(|_| {
+                device.create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )
+            });
+
+            if in_flight_fence.is_ok() {
+                return Ok(PerFrame {
+                    device,
+                    command_pool,
+                    command_buffer: command_buffer.unwrap()[0],
+                    image_available_semaphore: image_available_semaphore.unwrap(),
+                    render_finished_semaphore: render_finished_semaphore.unwrap(),
+                    in_flight_fence: in_flight_fence.unwrap(),
+                });
+            }
+
+            if let Ok(f) = in_flight_fence {
+                device.destroy_fence(f, None);
+            }
+
+            if let Ok(s) = render_finished_semaphore {
+                device.destroy_semaphore(s, None);
+            }
+
+            if let Ok(s) = image_available_semaphore {
+                device.destroy_semaphore(s, None);
+            }
+
+            if let Ok(c) = command_buffer {
+                device.free_command_buffers(command_pool, &c);
+            }
+
+            Err(in_flight_fence.unwrap_err())
+        }
+    }
+}
+
+impl Drop for PerFrame {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self
+                .device
+                .wait_for_fences(&[self.in_flight_fence], true, 100_000_000);
+            self.device
+                .destroy_semaphore(self.image_available_semaphore, None);
+            self.device
+                .destroy_semaphore(self.render_finished_semaphore, None);
+            self.device.free_command_buffers(self.command_pool, &[self.command_buffer]);
+            self.device.destroy_fence(self.in_flight_fence, None);
+        }
+    }
+}
+
+
 /// Our Vulkan app.
 //#[derive(Clone)]
 struct App {
@@ -86,7 +170,7 @@ struct App {
     surface_loader: ash::extensions::khr::Surface,
     surface: vk::SurfaceKHR,
     physical_device: vk::PhysicalDevice,
-    device: ash::Device,
+    device: Rc<ash::Device>,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
     swapchain_loader: ash::extensions::khr::Swapchain,
@@ -101,11 +185,12 @@ struct App {
     renderpass: vk::RenderPass,
     pipeline: vk::Pipeline,
     command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
 
-    image_available_semaphore: vk::Semaphore,
-    render_finished_semaphore: vk::Semaphore,
-    in_flight_fence: vk::Fence
+    per_frame: Vec<PerFrame>,
+
+    frame_count: usize,
+    count_start_time: std::time::Instant,
+    count_start_frame: usize
 }
 
 impl App {
@@ -318,7 +403,7 @@ impl App {
             .enabled_layer_names(&layers_raw)
             .enabled_extension_names(&required_device_extensions_raw); // .enabled_extension_names(&extensions_raw); -- all of these are layer-level not device-level
 
-        let device = instance.create_device(physical_device, &device_info, None)?;
+        let device = Rc::new(instance.create_device(physical_device, &device_info, None)?);
 
         let graphics_queue = device.get_device_queue(graphics_queue_family, 0);
 
@@ -355,10 +440,10 @@ impl App {
 
         let present = (|| {
             let preference = [
-                vk::PresentModeKHR::FIFO_RELAXED,
                 vk::PresentModeKHR::MAILBOX,
-                vk::PresentModeKHR::FIFO,
                 vk::PresentModeKHR::IMMEDIATE,
+                vk::PresentModeKHR::FIFO_RELAXED,
+                vk::PresentModeKHR::FIFO,
             ];
 
             for pref in preference {
@@ -369,7 +454,7 @@ impl App {
             present_modes[0]
         })();
 
-        let swapchain_count = swap_capabilities.min_image_count;
+        let swapchain_count = swap_capabilities.min_image_count + 4;
         let swapchain_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
             .min_image_count(swapchain_count)
@@ -538,33 +623,33 @@ impl App {
             .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
             .unwrap()[0];
 
-        let command_pool = device.create_command_pool(
-            &vk::CommandPoolCreateInfo::default()
-                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-                .queue_family_index(graphics_queue_family),
-            None,
-        ).unwrap();
+        let command_pool = device
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(graphics_queue_family),
+                None,
+            )
+            .unwrap();
 
-        let command_buffer = device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default()
-            .command_pool(command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1)
-        ).unwrap()[0];
+        let swapchain_framebuffers = swapchain_views
+            .iter()
+            .map(|&image_view| {
+                device.create_framebuffer(
+                    &vk::FramebufferCreateInfo::default()
+                        .render_pass(renderpass)
+                        .attachments(&[image_view])
+                        .width(swap_size.width)
+                        .height(swap_size.height)
+                        .layers(1),
+                    None,
+                )
+            })
+            .collect::<VkResult<Vec<vk::Framebuffer>>>()?;
 
-        let swapchain_framebuffers = swapchain_views.iter().map(|&image_view| 
-            device.create_framebuffer(&vk::FramebufferCreateInfo::default()
-                .render_pass(renderpass)
-                .attachments(&[image_view])
-                .width(swap_size.width)
-                .height(swap_size.height)
-                .layers(1),
-                 None)
-        ).collect::<VkResult<Vec<vk::Framebuffer>>>()?;
-        
-        let image_available_semaphore = device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap();
-        let render_finished_semaphore = device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap();
-        let in_flight_fence = device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None).unwrap();
-
+        let per_frame: Vec<PerFrame> = (0..4)
+            .map(|_| PerFrame::create(device.clone(), command_pool))
+            .collect::<VkResult<Vec<PerFrame>>>()?;
 
         Ok(Self {
             entry,
@@ -587,56 +672,96 @@ impl App {
             renderpass,
             pipeline,
             command_pool,
-            command_buffer,
-            image_available_semaphore,
-            render_finished_semaphore,
-            in_flight_fence
+            per_frame,
+            frame_count: 0,
+            count_start_time: std::time::Instant::now(),
+            count_start_frame: 0
         })
     }
 
     /// Renders a frame for our Vulkan app.
     unsafe fn render(&mut self, window: &Window) -> Result<()> {
-        
-        self.device.wait_for_fences(&[self.in_flight_fence], true, u64::max_value())?;
-        self.device.reset_fences(&[self.in_flight_fence])?;
-        let (swap_index, _) = self.swapchain_loader.acquire_next_image(self.swapchain, u64::MAX, self.image_available_semaphore, vk::Fence::null()).unwrap();
-        self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
-        
-        self.device.begin_command_buffer(self.command_buffer, &vk::CommandBufferBeginInfo::default())?;
-        self.device.cmd_begin_render_pass(self.command_buffer, &vk::RenderPassBeginInfo::default()
-            .render_pass(self.renderpass)
-            .framebuffer(self.swapchain_framebuffers[swap_index as usize])
-            .render_area(self.swap_size.into())
-            .clear_values(&[vk::ClearValue { color: vk::ClearColorValue { float32: [ 1.0, 1.0, 1.0, 0.0 ] } }]),
-             vk::SubpassContents::INLINE);
-        self.device.cmd_bind_pipeline(self.command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-        self.device.cmd_draw(self.command_buffer, 3, 1, 0, 0);
-        self.device.cmd_end_render_pass(self.command_buffer);
-        self.device.end_command_buffer(self.command_buffer)?;
+        let pf = &self.per_frame[self.frame_count % self.per_frame.len()];
 
-        self.device.queue_submit(self.graphics_queue, &[vk::SubmitInfo::default()
-            .wait_semaphores(&[self.image_available_semaphore])
-            .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
-            .command_buffers(&[self.command_buffer])
-            .signal_semaphores(&[self.render_finished_semaphore])],
-            self.in_flight_fence)?;
+        self.device
+            .wait_for_fences(&[pf.in_flight_fence], true, u64::max_value())?;
 
-        self.swapchain_loader.queue_present(self.present_queue, &vk::PresentInfoKHR::default()
-            .wait_semaphores(&[self.render_finished_semaphore])
-            .swapchains(&[self.swapchain])
-            .image_indices(&[swap_index])).unwrap();
+        self.frame_count += 1;
+        let now = std::time::Instant::now();
+        let elapsed = (now - self.count_start_time).as_secs_f64();
+        if elapsed > 1.0 {            
+            let num_frames = self.frame_count - self.count_start_frame;
+            println!("{} frames in {:.3} secs, average time {:.2} msecs or {:.1} FPS", num_frames, elapsed, elapsed * 1000. / num_frames as f64, num_frames as f64 / elapsed);
+            self.count_start_frame = self.frame_count;
+            self.count_start_time = now;
+        }
+        
+        self.device.reset_fences(&[pf.in_flight_fence])?;
+        let (swap_index, _) = self
+            .swapchain_loader
+            .acquire_next_image(
+                self.swapchain,
+                u64::MAX,
+                pf.image_available_semaphore,
+                vk::Fence::null(),
+            )
+            .unwrap();
+        self.device
+            .reset_command_buffer(pf.command_buffer, vk::CommandBufferResetFlags::empty())?;
+
+        self.device
+            .begin_command_buffer(pf.command_buffer, &vk::CommandBufferBeginInfo::default())?;
+        self.device.cmd_begin_render_pass(
+            pf.command_buffer,
+            &vk::RenderPassBeginInfo::default()
+                .render_pass(self.renderpass)
+                .framebuffer(self.swapchain_framebuffers[swap_index as usize])
+                .render_area(self.swap_size.into())
+                .clear_values(&[vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [1.0, 1.0, 1.0, 0.0],
+                    },
+                }]),
+            vk::SubpassContents::INLINE,
+        );
+        self.device.cmd_bind_pipeline(
+            pf.command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.pipeline,
+        );
+        self.device.cmd_draw(pf.command_buffer, 3, 1, 0, 0);
+        self.device.cmd_end_render_pass(pf.command_buffer);
+        self.device.end_command_buffer(pf.command_buffer)?;
+
+        self.device.queue_submit(
+            self.graphics_queue,
+            &[vk::SubmitInfo::default()
+                .wait_semaphores(&[pf.image_available_semaphore])
+                .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
+                .command_buffers(&[pf.command_buffer])
+                .signal_semaphores(&[pf.render_finished_semaphore])],
+            pf.in_flight_fence,
+        )?;
+
+        self.swapchain_loader
+            .queue_present(
+                self.present_queue,
+                &vk::PresentInfoKHR::default()
+                    .wait_semaphores(&[pf.render_finished_semaphore])
+                    .swapchains(&[self.swapchain])
+                    .image_indices(&[swap_index]),
+            )
+            .unwrap();
 
         //self.device.queue_submit(queue, submits, fence)
-        
 
         Ok(())
     }
 
     /// Destroys our Vulkan app.
     unsafe fn destroy(&mut self) {
-        self.device.destroy_semaphore(self.image_available_semaphore, None);
-        self.device.destroy_semaphore(self.render_finished_semaphore, None);
-        self.device.destroy_fence(self.in_flight_fence, None);
+        let _ = self.device.device_wait_idle();
+        self.per_frame.clear();
         for &fb in self.swapchain_framebuffers.iter() {
             self.device.destroy_framebuffer(fb, None);
         }
