@@ -3,30 +3,12 @@ use crate::util::*;
 use crate::config::*;
 use anyhow::{Context, Result};
 use ash::extensions::ext::DebugUtils;
-use ash::extensions::khr::{Swapchain, TimelineSemaphore};
-use safe_transmute::guard::AllOrNothingGuard;
-use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{Event, KeyboardInput, VirtualKeyCode, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::platform::windows::WindowExtWindows;
-use winit::window::{Window, WindowBuilder};
+use winit::window::Window;
 
-use ash::prelude::*;
-use ash::util::*;
-use ash::vk::{self, SurfaceKHR, SwapchainKHR};
-use safe_transmute::*;
-use std::cmp;
-use std::collections::HashMap;
-use std::collections::{BTreeMap, HashSet};
+use ash::vk;
 use std::default::Default;
 use std::ffi::CStr;
 use std::ffi::CString;
-use std::io::Cursor;
-use std::mem;
-use std::mem::align_of;
-use std::ops::Deref;
-use std::rc::Rc;
-use std::sync::Arc;
 
 pub struct Loaders {
     pub entry: ash::Entry,
@@ -35,7 +17,7 @@ pub struct Loaders {
 }
 
 impl Loaders {
-    pub unsafe fn new(window: &Window) -> anyhow::Result<Loaders> {
+    pub unsafe fn new(window: &Window) -> Result<Loaders> {
         let entry = ash::Entry::load()?;
         let version = match entry.try_enumerate_instance_version() {
             Ok(Some(version)) => version,

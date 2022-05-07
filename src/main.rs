@@ -1,7 +1,7 @@
 #![allow(
     dead_code,
     unused_variables,
-    unused_imports
+    //unused_imports
 //    clippy::too_many_arguments,
 //    clippy::unnecessary_wraps
 )]
@@ -15,9 +15,7 @@ mod swapsurface;
 mod renderer;
 mod window;
 
-use crate::util::*;
 use crate::loaders::*;
-use crate::config::*;
 use crate::device::*;
 use crate::perframe::*;
 use crate::swapsurface::*;
@@ -25,31 +23,15 @@ use crate::renderer::*;
 use crate::window::*;
 
 use anyhow::{Context, Result};
-use ash::extensions::ext::DebugUtils;
-use ash::extensions::khr::{Swapchain, TimelineSemaphore};
-use safe_transmute::guard::AllOrNothingGuard;
-use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::dpi::{LogicalSize};
 use winit::event::{Event, KeyboardInput, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::platform::windows::WindowExtWindows;
-use winit::window::{Window, WindowBuilder};
+use winit::window::{WindowBuilder};
 
 use ash::prelude::*;
-use ash::util::*;
-use ash::vk::{self, SurfaceKHR, SwapchainKHR};
-use safe_transmute::*;
-use std::cmp;
+use ash::vk;
 use std::collections::HashMap;
-use std::collections::{BTreeMap, HashSet};
-use std::default::Default;
-use std::ffi::CStr;
-use std::ffi::CString;
-use std::io::Cursor;
-use std::mem;
-use std::mem::align_of;
-use std::ops::Deref;
 use std::rc::Rc;
-use std::sync::Arc;
 
 
 fn main() -> Result<()> {

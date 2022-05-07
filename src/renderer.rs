@@ -1,36 +1,16 @@
-use crate::util::*;
 use crate::config::*;
-use crate::loaders::*;
 use crate::device::*;
 use crate::swapsurface::*;
 use crate::window::*;
 
 use anyhow::{Context, Result};
-use ash::extensions::ext::DebugUtils;
-use ash::extensions::khr::{Swapchain, TimelineSemaphore};
-use safe_transmute::guard::AllOrNothingGuard;
-use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{Event, KeyboardInput, VirtualKeyCode, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::platform::windows::WindowExtWindows;
-use winit::window::{Window, WindowBuilder};
 
 use ash::prelude::*;
-use ash::util::*;
-use ash::vk::{self, SurfaceKHR, SwapchainKHR};
+use ash::vk;
 use safe_transmute::*;
-use std::cmp;
-use std::collections::HashMap;
-use std::collections::{BTreeMap, HashSet};
 use std::default::Default;
 use std::ffi::CStr;
-use std::ffi::CString;
-use std::io::Cursor;
-use std::mem;
-use std::mem::align_of;
-use std::ops::Deref;
 use std::rc::Rc;
-use std::sync::Arc;
 
 
 static VERTEX_BYTECODE: &'static [u8] = include_bytes!("./vert.spv");
@@ -83,15 +63,15 @@ impl Renderer {
         let pipeline_layout = device
             .device
             .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None)
-            .unwrap();
+            .context("Could not create pipeline layout")?;
 
         let create_shader_module = |bytecode| {
             let code = transmute_many::<u32, PedanticGuard>(bytecode).unwrap();
             let shadermodule_info = vk::ShaderModuleCreateInfo::default().code(code);
             device.device.create_shader_module(&shadermodule_info, None)
         };
-        let vertex_shader_module = create_shader_module(&VERTEX_BYTECODE)?;
-        let fragment_shader_module = create_shader_module(&FRAGMENT_BYTECODE)?;
+        let vertex_shader_module = create_shader_module(&VERTEX_BYTECODE).context("Could not create vertex bytecode")?;
+        let fragment_shader_module = create_shader_module(&FRAGMENT_BYTECODE).context("Could not create fragment bytecode")?;
 
         let create_shader_stage = |module, stage| {
             vk::PipelineShaderStageCreateInfo::default()
