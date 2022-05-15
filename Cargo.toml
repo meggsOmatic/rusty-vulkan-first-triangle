@@ -8,9 +8,9 @@ edition = "2021"
 [dependencies]
 #ash="0.37"
 #ash-window="0.10"
-ash={ git = "https://github.com/MaikKlein/ash", rev="2a9a59e" }
-ash-window={ git = "https://github.com/MaikKlein/ash", rev="2a9a59e" }
-winit="0.26.1"
+ash={ git = "https://github.com/MaikKlein/ash", rev="c4f1c053ea36e4de91094c63109eeda677ca3ecf" }
+ash-window={ git = "https://github.com/MaikKlein/ash", rev="c4f1c053ea36e4de91094c63109eeda677ca3ecf" }
+winit="*"
 anyhow="1.0"
 pretty_env_logger="*"
 log="*"
