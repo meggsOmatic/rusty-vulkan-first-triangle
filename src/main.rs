@@ -23,10 +23,10 @@ use crate::renderer::*;
 use crate::window::*;
 
 use anyhow::{Context, Result};
-use winit::dpi::{LogicalSize};
+use winit::dpi::LogicalSize;
 use winit::event::{Event, KeyboardInput, VirtualKeyCode, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{WindowBuilder};
+use winit::event_loop::{EventLoopWindowTarget, ControlFlow, EventLoop};
+use winit::window::WindowBuilder;
 
 use ash::prelude::*;
 use ash::vk;
@@ -37,15 +37,23 @@ use std::rc::Rc;
 fn main() -> Result<()> {
     pretty_env_logger::init();
 
-    // Window
-
     let event_loop = EventLoop::new();
-    // App
 
     let mut app = unsafe { App::create(&event_loop)? };
     let mut destroying = false;
     event_loop.run(move |event, el_window_target, control_flow| {
         *control_flow = ControlFlow::Poll;
+        let mut close_window = |window_id, destroying: &mut bool| {        
+            if app.windows.remove(&window_id).is_none() {
+                println!("Could not find window {:?} to remove.", window_id);
+            }
+
+            if app.windows.is_empty() {
+                *destroying = true;
+                *control_flow = ControlFlow::Exit;
+            }
+        };
+
         match event {
             // Render a frame if our Vulkan app is not being destroyed.
             Event::MainEventsCleared if !destroying => unsafe {
@@ -76,16 +84,7 @@ fn main() -> Result<()> {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 window_id,
-            } => {
-                if app.windows.remove(&window_id).is_none() {
-                    println!("Could not find window {:?} to remove.", window_id);
-                }
-
-                if app.windows.is_empty() {
-                    destroying = true;
-                    *control_flow = ControlFlow::Exit;
-                }
-            }
+            } => { close_window(window_id, &mut destroying); },
             Event::WindowEvent {
                 event:
                     WindowEvent::KeyboardInput {
@@ -99,57 +98,8 @@ fn main() -> Result<()> {
                     },
                 window_id,
             } => match key {
-                VirtualKeyCode::N => unsafe {
-                    let window = WindowBuilder::new()
-                        .with_title("VK_RUSTY_TRIANGLE")
-                        .with_inner_size(LogicalSize::new(1024, 768))
-                        .build(&el_window_target)
-                        .context("Could not create window.")
-                        .unwrap();
-
-                    let loaders = &app.renderer.device.loaders;
-                    let surface = Rc::new(Surface {
-                        loaders: app.renderer.device.loaders.clone(),
-                        surface: ash_window::create_surface(
-                            &loaders.entry,
-                            &loaders.instance,
-                            &window,
-                            None,
-                        )
-                        .context("Could not create surface from window handle")
-                        .unwrap(),
-                    });
-
-                    let swap = PerSwapchain::new(
-                        app.renderer.device.clone(),
-                        &window,
-                        surface.clone(),
-                        Some(&app.renderer),
-                        None,
-                    )
-                    .context("Could not create additional swapchain")
-                    .unwrap();
-
-                    let per_frame: Vec<PerFrame> = (0..4)
-                        .map(|_| PerFrame::new(app.renderer.device.clone()))
-                        .collect::<VkResult<Vec<PerFrame>>>()
-                        .context("Could not create per-frame queues")
-                        .unwrap();
-
-                    let v_win = VulkanWindow {
-                        window,
-                        surface,
-                        device: app.renderer.device.clone(),
-                        swap,
-                        per_frame,
-
-                        frame_count: 0,
-                        count_start_time: std::time::Instant::now(),
-                        count_start_frame: 0,
-                    };
-
-                    app.windows.insert(v_win.window.id(), v_win);
-                },
+                VirtualKeyCode::N => { app.add_window(el_window_target); },
+                VirtualKeyCode::Escape => { close_window(window_id, &mut destroying); },
                 _ => {}
             },
             _ => {}
@@ -222,6 +172,60 @@ impl App {
         windows.insert(v_win.window.id(), v_win);
 
         Ok(Self { renderer, windows })
+    }
+
+    fn add_window(&mut self, event_loop: &EventLoopWindowTarget<()>) {
+        unsafe {
+            let window = WindowBuilder::new()
+                .with_title("VK_RUSTY_TRIANGLE")
+                .with_inner_size(LogicalSize::new(1024, 768))
+                .build(event_loop)
+                .context("Could not create window.")
+                .unwrap();
+
+            let loaders = &self.renderer.device.loaders;
+            let surface = Rc::new(Surface {
+                loaders: self.renderer.device.loaders.clone(),
+                surface: ash_window::create_surface(
+                    &loaders.entry,
+                    &loaders.instance,
+                    &window,
+                    None,
+                )
+                .context("Could not create surface from window handle")
+                .unwrap(),
+            });
+
+            let swap = PerSwapchain::new(
+                self.renderer.device.clone(),
+                &window,
+                surface.clone(),
+                Some(&self.renderer),
+                None,
+            )
+            .context("Could not create additional swapchain")
+            .unwrap();
+
+            let per_frame: Vec<PerFrame> = (0..4)
+                .map(|_| PerFrame::new(self.renderer.device.clone()))
+                .collect::<VkResult<Vec<PerFrame>>>()
+                .context("Could not create per-frame queues")
+                .unwrap();
+
+            let v_win = VulkanWindow {
+                window,
+                surface,
+                device: self.renderer.device.clone(),
+                swap,
+                per_frame,
+
+                frame_count: 0,
+                count_start_time: std::time::Instant::now(),
+                count_start_frame: 0,
+            };
+
+            self.windows.insert(v_win.window.id(), v_win);
+        }
     }
 }
 
