@@ -17,6 +17,11 @@ pub struct VulkanWindow {
     pub frame_count: usize,
     pub count_start_time: std::time::Instant,
     pub count_start_frame: usize,
+
+    pub anim_start_time: std::time::Instant,
+    pub shape_rotate_speed: f32,
+    pub color_rotate_speed: f32,
+    pub background_color: [f32; 4]
 }
 
 impl Drop for VulkanWindow {

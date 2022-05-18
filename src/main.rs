@@ -23,7 +23,7 @@ use crate::renderer::*;
 use crate::window::*;
 
 use anyhow::{Context, Result};
-use winit::dpi::LogicalSize;
+use winit::dpi::{ LogicalSize, PhysicalSize, PhysicalPosition };
 use winit::event::{Event, KeyboardInput, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{EventLoopWindowTarget, ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
@@ -32,6 +32,7 @@ use ash::prelude::*;
 use ash::vk;
 use std::collections::HashMap;
 use std::rc::Rc;
+use rand::prelude::*;
 
 
 fn main() -> Result<()> {
@@ -127,7 +128,7 @@ impl App {
 
         let window = WindowBuilder::new()
             .with_title("VK_RUSTY_TRIANGLE")
-            .with_inner_size(LogicalSize::new(1536, 1152))
+            .with_inner_size(LogicalSize::new(1280f32 * thread_rng().gen_range(0.75f32..1.25f32), 720f32 * thread_rng().gen_range(0.75f32..1.25f32)))
             .build(&event_loop)
             .context("Could not create window.")?;
 
@@ -166,6 +167,11 @@ impl App {
             frame_count: 0,
             count_start_time: std::time::Instant::now(),
             count_start_frame: 0,
+
+            anim_start_time: std::time::Instant::now(),
+            shape_rotate_speed: thread_rng().gen_range(-1.5..1.5) as f32,
+            color_rotate_speed: thread_rng().gen_range(-1.5..1.5) as f32,
+            background_color: [ 1.0, 1.0, 1.0, 0.0 ]
         };
 
         let mut windows = HashMap::new();
@@ -176,9 +182,20 @@ impl App {
 
     fn add_window(&mut self, event_loop: &EventLoopWindowTarget<()>) {
         unsafe {
+            let monitor = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next()).unwrap();
+            let monitor_size = monitor.size();
+            let size = PhysicalSize::<u32> {
+                width: (monitor_size.width as f64 * thread_rng().gen_range(0.33..0.66)) as u32,
+                height: (monitor_size.height as f64 * thread_rng().gen_range(0.33..0.66)) as u32,
+            };
+            let pos = PhysicalPosition::<i32> {
+                x: monitor.position().x + (thread_rng().gen_range(0..(monitor_size.width - size.width)) as i32),
+                y: monitor.position().y + (thread_rng().gen_range(0..(monitor_size.height - size.height)) as i32)
+            };
             let window = WindowBuilder::new()
                 .with_title("VK_RUSTY_TRIANGLE")
-                .with_inner_size(LogicalSize::new(1024, 768))
+                .with_inner_size(size)
+                .with_position(pos)
                 .build(event_loop)
                 .context("Could not create window.")
                 .unwrap();
@@ -212,6 +229,11 @@ impl App {
                 .context("Could not create per-frame queues")
                 .unwrap();
 
+            let rate = thread_rng().gen_range(0.0f32..3.0f32);
+            let c = thread_rng().gen_range(0.1f32..0.9f32);
+            let r = c + thread_rng().gen_range(-0.09f32..0.09f32);
+            let g = c + thread_rng().gen_range(-0.09f32..0.09f32);
+            let b = c + thread_rng().gen_range(-0.09f32..0.09f32);
             let v_win = VulkanWindow {
                 window,
                 surface,
@@ -222,6 +244,11 @@ impl App {
                 frame_count: 0,
                 count_start_time: std::time::Instant::now(),
                 count_start_frame: 0,
+
+                anim_start_time: std::time::Instant::now(),
+                shape_rotate_speed: rate - 1.5f32,
+                color_rotate_speed: (rate + 1.5f32 % 3.0) - 1.5f32,
+                background_color: [ r, g, b, 0.0 ]
             };
 
             self.windows.insert(v_win.window.id(), v_win);

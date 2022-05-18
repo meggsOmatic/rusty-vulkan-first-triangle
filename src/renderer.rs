@@ -1,20 +1,73 @@
 use crate::config::*;
 use crate::device::*;
 use crate::swapsurface::*;
+use crate::util::as_byte_slice;
 use crate::window::*;
 
 use anyhow::{Context, Result};
 
+use anyhow::*;
 use ash::prelude::*;
 use ash::vk;
+use glam::*;
 use safe_transmute::*;
 use std::default::Default;
 use std::ffi::CStr;
+use std::mem;
 use std::rc::Rc;
-
 
 static VERTEX_BYTECODE: &'static [u8] = include_bytes!("./vert.spv");
 static FRAGMENT_BYTECODE: &'static [u8] = include_bytes!("./frag.spv");
+
+#[repr(C, packed)]
+pub struct Vertex {
+    pub pos: Vec2,
+    pub color: Vec3,
+}
+
+impl Vertex {
+    fn get_description() -> (
+        vk::VertexInputBindingDescription,
+        Vec<vk::VertexInputAttributeDescription>,
+    ) {
+        (
+            vk::VertexInputBindingDescription {
+                binding: 0,
+                stride: mem::size_of::<Vertex>() as u32,
+                input_rate: vk::VertexInputRate::VERTEX,
+            },
+            vec![
+                vk::VertexInputAttributeDescription {
+                    binding: 0,
+                    location: 0,
+                    format: vk::Format::R32G32_SFLOAT,
+                    offset: memoffset::offset_of!(Vertex, pos) as u32,
+                },
+                vk::VertexInputAttributeDescription {
+                    binding: 0,
+                    location: 1,
+                    format: vk::Format::R32G32B32_SFLOAT,
+                    offset: memoffset::offset_of!(Vertex, color) as u32,
+                },
+            ],
+        )
+    }
+}
+
+static TRIANGLE: &'static [Vertex] = &[
+    Vertex {
+        pos: const_vec2!([0.0, -0.5]),
+        color: const_vec3!([1.0, 0.0, 0.0]),
+    },
+    Vertex {
+        pos: const_vec2!([0.5, 0.5]),
+        color: const_vec3!([0.0, 1.0, 0.0]),
+    },
+    Vertex {
+        pos: const_vec2!([-0.5, 0.5]),
+        color: const_vec3!([0.0, 0.0, 1.0]),
+    },
+];
 
 pub struct Renderer {
     pub device: Rc<Device>,
@@ -23,6 +76,9 @@ pub struct Renderer {
     pub fragment_shader_module: vk::ShaderModule,
     pub pipeline_layout: vk::PipelineLayout,
     pub pipeline: vk::Pipeline,
+    pub vertex_buffer: vk::Buffer,
+    pub vertex_buffer_memory: vk::DeviceMemory,
+    pub start_time: std::time::SystemTime
 }
 
 impl Renderer {
@@ -60,9 +116,15 @@ impl Renderer {
 
         let renderpass = device.device.create_render_pass(&renderpass_info, None)?;
 
+        let push_constant_ranges = [vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+            size: 16,
+            offset: 0
+        }];
         let pipeline_layout = device
             .device
-            .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None)
+            .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default()
+                .push_constant_ranges(&push_constant_ranges), None)
             .context("Could not create pipeline layout")?;
 
         let create_shader_module = |bytecode| {
@@ -70,8 +132,10 @@ impl Renderer {
             let shadermodule_info = vk::ShaderModuleCreateInfo::default().code(code);
             device.device.create_shader_module(&shadermodule_info, None)
         };
-        let vertex_shader_module = create_shader_module(&VERTEX_BYTECODE).context("Could not create vertex bytecode")?;
-        let fragment_shader_module = create_shader_module(&FRAGMENT_BYTECODE).context("Could not create fragment bytecode")?;
+        let vertex_shader_module =
+            create_shader_module(&VERTEX_BYTECODE).context("Could not create vertex bytecode")?;
+        let fragment_shader_module = create_shader_module(&FRAGMENT_BYTECODE)
+            .context("Could not create fragment bytecode")?;
 
         let create_shader_stage = |module, stage| {
             vk::PipelineShaderStageCreateInfo::default()
@@ -85,7 +149,11 @@ impl Renderer {
             create_shader_stage(fragment_shader_module, vk::ShaderStageFlags::FRAGMENT),
         ];
 
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+        let vertex_desc = Vertex::get_description();
+        let input_descs = [vertex_desc.0];
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&input_descs)
+            .vertex_attribute_descriptions(&vertex_desc.1);
 
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -158,6 +226,70 @@ impl Renderer {
             .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
             .unwrap()[0];
 
+        let vertex_buffer = device
+            .device
+            .create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(mem::size_of_val(TRIANGLE) as u64)
+                    .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                None,
+            )
+            .context("Creating vertex buffer")?;
+
+        let mem_reqs = device.device.get_buffer_memory_requirements(vertex_buffer);
+        dbg!(mem_reqs);
+        let mem_props = device
+            .loaders
+            .instance
+            .get_physical_device_memory_properties(device.physical_device);
+        dbg!(mem_props);
+
+        let type_index = (0..mem_props.memory_type_count)
+            .find(|&type_index| {
+                mem_reqs.memory_type_bits & (1 << type_index) != 0
+                    && mem_props.memory_types[type_index as usize]
+                        .property_flags
+                        .contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
+            })
+            .context("Could not find a memory type for the vertex buffer")?;
+
+        let vertex_buffer_memory = device
+            .device
+            .allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(mem_reqs.size)
+                    .memory_type_index(type_index),
+                None,
+            )
+            .context("Could not allocate vertex buffer memory")?;
+
+        device
+            .device
+            .bind_buffer_memory(vertex_buffer, vertex_buffer_memory, 0)
+            .context("Binding vertex buffer memory")?;
+
+        let map_ptr = device
+            .device
+            .map_memory(
+                vertex_buffer_memory,
+                0,
+                vk::WHOLE_SIZE,
+                vk::MemoryMapFlags::empty(),
+            )
+            .context("Mapping vertex buffer memory")?;
+
+        std::ptr::copy_nonoverlapping(TRIANGLE.as_ptr(), map_ptr as *mut Vertex, TRIANGLE.len());
+
+        device.device.flush_mapped_memory_ranges(&[vk::MappedMemoryRange {
+            memory: vertex_buffer_memory,
+            offset: 0,
+            size: vk::WHOLE_SIZE,
+            ..Default::default()
+        }]).context("Flushing caches")?;
+
+        device.device.unmap_memory(vertex_buffer_memory);
+
         Ok(Renderer {
             device,
             renderpass,
@@ -165,6 +297,9 @@ impl Renderer {
             fragment_shader_module,
             pipeline_layout,
             pipeline,
+            vertex_buffer,
+            vertex_buffer_memory,
+            start_time: std::time::SystemTime::now()
         })
     }
 
@@ -178,7 +313,7 @@ impl Renderer {
         win.frame_count += 1;
         let now = std::time::Instant::now();
         let elapsed = (now - win.count_start_time).as_secs_f64();
-        if elapsed > 1.0 {
+        if false && elapsed > 1.0 {
             let num_frames = win.frame_count - win.count_start_frame;
             println!(
                 "{} frames in {:.3} secs, average time {:.2} msecs or {:.1} FPS",
@@ -209,7 +344,7 @@ impl Renderer {
                 .render_area(win.swap.size.into())
                 .clear_values(&[vk::ClearValue {
                     color: vk::ClearColorValue {
-                        float32: [1.0, 1.0, 1.0, 0.0],
+                        float32: win.background_color
                     },
                 }]),
             vk::SubpassContents::INLINE,
@@ -220,6 +355,8 @@ impl Renderer {
             vk::PipelineBindPoint::GRAPHICS,
             self.pipeline,
         );
+
+        dev.cmd_bind_vertex_buffers(pf.command_buffer, 0, &[self.vertex_buffer], &[0]);
 
         if VK_DYNAMIC_VIEW_SIZE {
             dev.cmd_set_viewport(
@@ -245,6 +382,16 @@ impl Renderer {
             );
         }
 
+        let time = std::time::Instant::now().duration_since(win.anim_start_time).as_secs_f64() as f32;
+        let min_dim = std::cmp::min(win.swap.size.width, win.swap.size.height) as f32;
+        let pcs = vec4(
+            min_dim / win.swap.size.width as f32,
+            min_dim / win.swap.size.height as f32,
+            time * win.shape_rotate_speed,
+            time * win.color_rotate_speed
+        );
+        
+        dev.cmd_push_constants(pf.command_buffer, self.pipeline_layout, vk::ShaderStageFlags::FRAGMENT, 0, as_byte_slice(&pcs));
         dev.cmd_draw(pf.command_buffer, 3, 1, 0, 0);
         dev.cmd_end_render_pass(pf.command_buffer);
         dev.end_command_buffer(pf.command_buffer)?;
@@ -268,7 +415,7 @@ impl Renderer {
                 .image_indices(&[swap_index]),
         )?;
 
-        Ok(())
+        Result::Ok(())
     }
 }
 
@@ -289,6 +436,10 @@ impl Drop for Renderer {
             self.device
                 .device
                 .destroy_shader_module(self.vertex_shader_module, None);
+            self.device.device.destroy_buffer(self.vertex_buffer, None);
+            self.device
+                .device
+                .free_memory(self.vertex_buffer_memory, None);
         }
     }
 }

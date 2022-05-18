@@ -1,20 +1,21 @@
 #version 450
 
-layout(location = 0) out vec3 fragColor;
+layout(location = 0) in vec2 inPosition;
+layout(location = 1) in vec3 inColor;
 
-vec2 positions[3] = vec2[](
-    vec2(0.0, -0.577),
-    vec2(0.5, 0.577),
-    vec2(-0.5, 0.577)
-);
+layout(location = 0) out vec2 colorCoords;
 
-vec3 colors[3] = vec3[](
-    vec3(1.0, 1.0, 0.0),
-    vec3(0.0, 1.0, 1.0),
-    vec3(1.0, 0.0, 1.0)
-);
+layout( push_constant ) uniform constants
+{
+    float width_scale;
+    float height_scale;
+    float shape_rotate;
+    float color_rotate;
+} PushConstants;
+
 
 void main() {
-    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
-    fragColor = colors[gl_VertexIndex];
+    float theta = gl_VertexIndex * (3.14159265 * 2.0 / 3.0) + PushConstants.shape_rotate;
+    colorCoords = vec2(cos(theta), sin(theta));
+    gl_Position = vec4(PushConstants.width_scale * colorCoords.x, PushConstants.height_scale * colorCoords.y, 0.0, 1.0);
 }
