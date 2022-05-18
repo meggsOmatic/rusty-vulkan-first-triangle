@@ -8,3 +8,7 @@ For the sake of Rust learning, I intentionally limited myself to working only fr
 
 One interesting complication is that the code supports multiple resizable windows (press N to open, ESC to close), which means multiple Vulkan objects with various lifetimes and depencies. I got the Rust code structured in a way where all Vulkan object lifetimes are directly and automatically tied to Rust lifetimes. All Vulkan deallocation and cleanup happens solely from Rust `drop()` implementations, with 100% clean diagnostics from the validation layers, so I think I'm starting to have a solid grip on lifetimes and the borrow checker. :-)
 
+
+
+https://user-images.githubusercontent.com/5649419/169148913-57e914a9-9743-4f64-aa77-40eb67b035fa.mp4
+
